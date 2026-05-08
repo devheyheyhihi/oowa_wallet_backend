@@ -8,6 +8,9 @@
     "start": "node --env-file=.env src/index.js",
     "check": "node --check src/index.js && node --check src/historyDb.js && node --check src/authCrypto.js && node --check src/walletCrypto.js"
   },
+  "dependencies": {
+    "bip39": "3.1.0"
+  },
   "engines": {
     "node": ">=24"
   }

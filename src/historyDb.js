@@ -39,7 +39,7 @@ const TXHASH_PATTERN = /^[0-9a-f]{32,128}$/;
 const LOGIN_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{3,23}$/;
 const PHONE_PATTERN = /^[0-9+\-\s]{8,20}$/;
 const require = createRequire(import.meta.url);
-const bip39 = require("../../frontend/node_modules/bip39/src/index.js");
+const bip39 = require("bip39");
 
 let db;
 
@@ -385,6 +385,7 @@ const getDb = () => {
 
     CREATE TABLE IF NOT EXISTS payment_orders (
       id TEXT PRIMARY KEY,
+      payment_type TEXT NOT NULL DEFAULT 'standard',
       payer_wallet_address TEXT NOT NULL,
       merchant_wallet_address TEXT NOT NULL,
       total_amount_raw TEXT NOT NULL,
@@ -564,6 +565,27 @@ const getDb = () => {
     "mnemonic_available",
     "mnemonic_available INTEGER NOT NULL DEFAULT 0",
   );
+  ensureTableColumn(
+    db,
+    "payment_orders",
+    "payment_type",
+    "payment_type TEXT NOT NULL DEFAULT 'standard'",
+  );
+  db.exec(`
+    UPDATE payment_orders
+    SET payment_type = CASE
+      WHEN EXISTS (
+        SELECT 1
+        FROM payment_transfers pt
+        WHERE pt.payment_order_id = payment_orders.id
+          AND pt.transfer_role IN ('merchant', 'referrer_level1', 'referrer_level2')
+      )
+      THEN 'merchant'
+      ELSE 'standard'
+    END
+    WHERE payment_type IS NULL
+       OR payment_type NOT IN ('standard', 'merchant');
+  `);
   db.exec(`
     UPDATE wallet_transactions
     SET entry_kind = CASE
@@ -693,6 +715,7 @@ const mapRegistry = (row) => ({
 
 const mapPaymentOrder = (row) => ({
   id: row.id,
+  paymentType: row.payment_type ?? "standard",
   payerWalletAddress: row.payer_wallet_address,
   merchantWalletAddress: row.merchant_wallet_address,
   totalAmountRaw: row.total_amount_raw,
@@ -2149,6 +2172,7 @@ export const listWalletActivity = (
        FROM payment_transfers pt
        JOIN payment_orders po ON po.id = pt.payment_order_id
        WHERE po.payer_wallet_address = ?
+         AND po.payment_type = 'merchant'
          AND pt.txhash IS NOT NULL`,
     )
     .all(normalizedWallet);
@@ -2208,7 +2232,7 @@ export const listWalletActivity = (
        WHERE wallet_address = ? ${txExclude} ${entryKindFilter} ${dirFilter}`
     : "";
   const paymentCountSql = includePayments
-    ? `SELECT 1 FROM payment_orders WHERE payer_wallet_address = ?`
+    ? `SELECT 1 FROM payment_orders WHERE payer_wallet_address = ? AND payment_type = 'merchant'`
     : "";
   const unionCountSql =
     txCountSql && paymentCountSql
@@ -2238,7 +2262,8 @@ export const listWalletActivity = (
               id        AS row_id,
               CAST(strftime('%s', COALESCE(completed_at, updated_at, created_at)) AS REAL) AS sort_ts
        FROM payment_orders
-       WHERE payer_wallet_address = ?`
+       WHERE payer_wallet_address = ?
+         AND payment_type = 'merchant'`
     : "";
   const unionPageSql =
     txPageSql && paymentPageSql
@@ -2345,6 +2370,7 @@ export const getMerchantProfileChangeRequest = (walletAddress) => {
 
 export const listAdminMerchantProfiles = ({
   statuses = ["draft", "pending", "denied"],
+  search = null,
   limit = 20,
   offset = 0,
 } = {}) => {
@@ -2352,20 +2378,50 @@ export const listAdminMerchantProfiles = ({
   const placeholders = allowedStatuses.map(() => "?").join(", ");
   const normalizedLimit = Math.min(Math.max(1, Number(limit) || 20), 100);
   const normalizedOffset = Math.max(0, Number(offset) || 0);
+  const params = [...allowedStatuses];
+  let searchClause = "";
+
+  if (search && String(search).trim()) {
+    const normalizedSearch = `%${String(search).trim()}%`;
+    searchClause = `
+      AND (
+        wallet_address LIKE ?
+        OR merchant_name LIKE ?
+        OR category LIKE ?
+        OR address_main LIKE ?
+        OR address_detail LIKE ?
+        OR phone LIKE ?
+      )
+    `;
+    params.push(
+      normalizedSearch,
+      normalizedSearch,
+      normalizedSearch,
+      normalizedSearch,
+      normalizedSearch,
+      normalizedSearch,
+    );
+  }
 
   const total = getDb()
-    .prepare(`SELECT COUNT(*) AS cnt FROM merchant_profiles WHERE status IN (${placeholders})`)
-    .get(...allowedStatuses).cnt;
+    .prepare(
+      `SELECT COUNT(*) AS cnt
+       FROM merchant_profiles
+       WHERE status IN (${placeholders})
+       ${searchClause}`,
+    )
+    .get(...params).cnt;
 
   const rows = getDb()
     .prepare(
       `SELECT *
        FROM merchant_profiles
        WHERE status IN (${placeholders})
+       ${searchClause}
        ORDER BY updated_at DESC
        LIMIT ? OFFSET ?`,
     )
-    .all(...allowedStatuses, normalizedLimit, normalizedOffset);
+    .all(...params, normalizedLimit, normalizedOffset);
 
   return { profiles: rows.map(mapMerchantProfile), total, limit: normalizedLimit, offset: normalizedOffset };
 };
@@ -2388,6 +2444,7 @@ export const listApprovedMerchantProfiles = () => {
 
 export const listAdminMerchantChangeRequests = ({
   statuses = ["pending"],
+  search = null,
   limit = 20,
   offset = 0,
 } = {}) => {
@@ -2395,24 +2452,50 @@ export const listAdminMerchantChangeRequests = ({
   const placeholders = allowedStatuses.map(() => "?").join(", ");
   const normalizedLimit = Math.min(Math.max(1, Number(limit) || 20), 100);
   const normalizedOffset = Math.max(0, Number(offset) || 0);
+  const params = [...allowedStatuses];
+  let searchClause = "";
+
+  if (search && String(search).trim()) {
+    const normalizedSearch = `%${String(search).trim()}%`;
+    searchClause = `
+      AND (
+        wallet_address LIKE ?
+        OR merchant_name LIKE ?
+        OR category LIKE ?
+        OR address_main LIKE ?
+        OR address_detail LIKE ?
+        OR phone LIKE ?
+      )
+    `;
+    params.push(
+      normalizedSearch,
+      normalizedSearch,
+      normalizedSearch,
+      normalizedSearch,
+      normalizedSearch,
+      normalizedSearch,
+    );
+  }
 
   const total = getDb()
     .prepare(
       `SELECT COUNT(*) AS cnt
        FROM merchant_profile_change_requests
-       WHERE status IN (${placeholders})`,
+       WHERE status IN (${placeholders})
+       ${searchClause}`,
     )
-    .get(...allowedStatuses).cnt;
+    .get(...params).cnt;
 
   const rows = getDb()
     .prepare(
       `SELECT *
        FROM merchant_profile_change_requests
        WHERE status IN (${placeholders})
+       ${searchClause}
        ORDER BY updated_at DESC
        LIMIT ? OFFSET ?`,
     )
-    .all(...allowedStatuses, normalizedLimit, normalizedOffset);
+    .all(...params, normalizedLimit, normalizedOffset);
 
   return {
     changeRequests: rows.map(mapMerchantProfileChangeRequest),
@@ -2900,6 +2983,7 @@ export const getAdminInvestmentSummary = () => {
 
 export const listAdminInvestments = ({
   statuses = ["active", "completed", "payout_failed"],
+  search = null,
   limit = 20,
   offset = 0,
 } = {}) => {
@@ -2910,14 +2994,40 @@ export const listAdminInvestments = ({
   const placeholders = allowedStatuses.map(() => "?").join(", ");
   const normalizedLimit = Math.min(Math.max(1, Number(limit) || 20), 100);
   const normalizedOffset = Math.max(0, Number(offset) || 0);
+  const params = [...allowedStatuses];
+  let searchClause = "";
+
+  if (search && String(search).trim()) {
+    const normalizedSearch = `%${String(search).trim()}%`;
+    searchClause = `
+      AND (
+        login_id LIKE ?
+        OR name LIKE ?
+        OR phone LIKE ?
+        OR wallet_address LIKE ?
+        OR deposit_txhash LIKE ?
+        OR payout_txhash LIKE ?
+      )
+    `;
+    params.push(
+      normalizedSearch,
+      normalizedSearch,
+      normalizedSearch,
+      normalizedSearch,
+      normalizedSearch,
+      normalizedSearch,
+    );
+  }
 
   const total = getDb()
     .prepare(
       `SELECT COUNT(*) AS cnt
        FROM (
          SELECT
-           ip.id,
-           ip.status,
+           ip.*,
+           u.login_id,
+           u.name,
+           u.phone,
            CASE
              WHEN (
                SELECT payout.status
@@ -2929,10 +3039,12 @@ export const listAdminInvestments = ({
              ELSE ip.status
            END AS admin_status
          FROM investment_positions ip
+         JOIN users u ON u.id = ip.user_id
        ) filtered
-       WHERE admin_status IN (${placeholders})`,
+       WHERE admin_status IN (${placeholders})
+       ${searchClause}`,
     )
-    .get(...allowedStatuses).cnt;
+    .get(...params).cnt;
 
   const rows = getDb()
     .prepare(
@@ -3027,10 +3139,11 @@ export const listAdminInvestments = ({
          JOIN users u ON u.id = ip.user_id
        ) investments
        WHERE admin_status IN (${placeholders})
+       ${searchClause}
        ORDER BY created_at DESC
        LIMIT ? OFFSET ?`,
     )
-    .all(...allowedStatuses, normalizedLimit, normalizedOffset);
+    .all(...params, normalizedLimit, normalizedOffset);
 
   return {
     investments: rows.map(mapAdminInvestment),
@@ -3104,6 +3217,11 @@ export const getAdminUserDetail = ({ userId }) => {
   }
 
   const user = mapAdminUser(row);
+  const registry = getWalletRegistry(row.wallet_address);
+  const level1WalletAddress = registry?.referrerWalletAddress ?? null;
+  const level2WalletAddress = level1WalletAddress
+    ? getWalletRegistry(level1WalletAddress)?.referrerWalletAddress ?? null
+    : null;
   const merchantProfile = getMerchantProfile(row.wallet_address);
   const latestTransactions = getDb()
     .prepare(
@@ -3128,6 +3246,8 @@ export const getAdminUserDetail = ({ userId }) => {
 
   return {
     user,
+    referrerWalletAddress: level1WalletAddress,
+    referrerLevel2WalletAddress: level2WalletAddress,
     merchantProfile,
     latestTransactions,
     investments,
@@ -3401,8 +3521,8 @@ export const getPaymentQuote = ({
     : null;
   const level2WalletAddress = level2?.isActive ? level2.walletAddress : null;
 
-  const level1AmountRaw = level1WalletAddress ? (total * 3n) / 100n : 0n;
-  const level2AmountRaw = level2WalletAddress ? (total * 7n) / 100n : 0n;
+  const level1AmountRaw = level1WalletAddress ? (total * 7n) / 100n : 0n;
+  const level2AmountRaw = level2WalletAddress ? (total * 3n) / 100n : 0n;
   const merchantAmountRaw = total - level1AmountRaw - level2AmountRaw;
 
   const transfers = [
@@ -3479,6 +3599,7 @@ export const createPaymentOrder = ({
     .prepare(
       `INSERT INTO payment_orders (
          id,
+         payment_type,
          payer_wallet_address,
          merchant_wallet_address,
          total_amount_raw,
@@ -3494,10 +3615,11 @@ export const createPaymentOrder = ({
          updated_at,
          completed_at
        )
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       paymentOrderId,
+      quote.isMerchantPayment ? "merchant" : "standard",
       assertAddress(payerWalletAddress, "payerWalletAddress"),
       assertAddress(toWalletAddress, "toWalletAddress"),
       quote.totalAmountRaw,
@@ -3681,6 +3803,8 @@ export const recordPaymentTransferFailed = ({
 
 export const listAdminPaymentOrders = ({
   statuses = ["partial_failed", "failed"],
+  paymentType = "all",
+  search = null,
   limit = 20,
   offset = 0,
 } = {}) => {
@@ -3689,22 +3813,52 @@ export const listAdminPaymentOrders = ({
     "failed",
   ];
   const placeholders = allowedStatuses.map(() => "?").join(", ");
+  const normalizedPaymentType =
+    paymentType === "merchant" || paymentType === "standard" ? paymentType : "all";
+  const paymentTypeFilter =
+    normalizedPaymentType === "all" ? "" : " AND payment_type = ? ";
   const normalizedLimit = Math.min(Math.max(1, Number(limit) || 20), 100);
   const normalizedOffset = Math.max(0, Number(offset) || 0);
+  const paymentTypeParams =
+    normalizedPaymentType === "all" ? [] : [normalizedPaymentType];
+  const params = [...allowedStatuses, ...paymentTypeParams];
+  let searchClause = "";
+
+  if (search && String(search).trim()) {
+    const normalizedSearch = `%${String(search).trim()}%`;
+    searchClause = `
+      AND (
+        id LIKE ?
+        OR payer_wallet_address LIKE ?
+        OR merchant_wallet_address LIKE ?
+        OR failure_reason LIKE ?
+      )
+    `;
+    params.push(
+      normalizedSearch,
+      normalizedSearch,
+      normalizedSearch,
+      normalizedSearch,
+    );
+  }
 
   const total = getDb()
-    .prepare(`SELECT COUNT(*) AS cnt FROM payment_orders WHERE status IN (${placeholders})`)
-    .get(...allowedStatuses).cnt;
+    .prepare(
+      `SELECT COUNT(*) AS cnt
+       FROM payment_orders
+       WHERE status IN (${placeholders}) ${paymentTypeFilter} ${searchClause}`,
+    )
+    .get(...params).cnt;
 
   const rows = getDb()
     .prepare(
       `SELECT *
        FROM payment_orders
-       WHERE status IN (${placeholders})
+       WHERE status IN (${placeholders}) ${paymentTypeFilter} ${searchClause}
        ORDER BY updated_at DESC
        LIMIT ? OFFSET ?`,
     )
-    .all(...allowedStatuses, normalizedLimit, normalizedOffset);
+    .all(...params, normalizedLimit, normalizedOffset);
 
   return {
     payments: rows.map((row) => ({

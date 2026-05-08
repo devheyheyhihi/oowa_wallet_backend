@@ -34,12 +34,21 @@ jobs:
             exit 1
           fi
 
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install Dependencies
+        run: npm install --omit=dev --no-audit --no-fund
+
       - name: Package Backend
         run: |
           rm -rf /tmp/oowa-backend-dist
           mkdir -p /tmp/oowa-backend-dist
           cp -R src /tmp/oowa-backend-dist/
           cp package.json /tmp/oowa-backend-dist/
+          cp -R node_modules /tmp/oowa-backend-dist/
           tar -czf backend-standalone.tar.gz -C /tmp/oowa-backend-dist .
 
       - name: Upload to EC2

@@ -407,6 +407,8 @@ const routeRequest = async (request, response) => {
     if (method === "GET" && url.pathname === "/api/admin/payments") {
       requireAdmin(request);
       const statuses = url.searchParams.get("statuses");
+      const paymentType = url.searchParams.get("paymentType") ?? "all";
+      const search = url.searchParams.get("search");
       const page = Math.max(0, parseInt(url.searchParams.get("page") ?? "0", 10) || 0);
       const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get("limit") ?? "20", 10) || 20));
       const result = listAdminPaymentOrders({
@@ -416,6 +418,8 @@ const routeRequest = async (request, response) => {
               .map((status) => status.trim())
               .filter(Boolean)
           : undefined,
+        paymentType,
+        search,
         limit,
         offset: page * limit,
       });
@@ -426,6 +430,7 @@ const routeRequest = async (request, response) => {
     if (method === "GET" && url.pathname === "/api/admin/merchant-profiles") {
       requireAdmin(request);
       const statuses = url.searchParams.get("statuses");
+      const search = url.searchParams.get("search");
       const page = Math.max(0, parseInt(url.searchParams.get("page") ?? "0", 10) || 0);
       const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get("limit") ?? "20", 10) || 20));
       const result = listAdminMerchantProfiles({
@@ -435,6 +440,7 @@ const routeRequest = async (request, response) => {
               .map((status) => status.trim())
               .filter(Boolean)
           : undefined,
+        search,
         limit,
         offset: page * limit,
       });
@@ -445,6 +451,7 @@ const routeRequest = async (request, response) => {
     if (method === "GET" && url.pathname === "/api/admin/merchant-change-requests") {
       requireAdmin(request);
       const statuses = url.searchParams.get("statuses");
+      const search = url.searchParams.get("search");
       const page = Math.max(0, parseInt(url.searchParams.get("page") ?? "0", 10) || 0);
       const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get("limit") ?? "20", 10) || 20));
       const result = listAdminMerchantChangeRequests({
@@ -454,6 +461,7 @@ const routeRequest = async (request, response) => {
               .map((status) => status.trim())
               .filter(Boolean)
           : undefined,
+        search,
         limit,
         offset: page * limit,
       });
@@ -492,6 +500,7 @@ const routeRequest = async (request, response) => {
     if (method === "GET" && url.pathname === "/api/admin/investments") {
       requireAdmin(request);
       const statuses = url.searchParams.get("statuses");
+      const search = url.searchParams.get("search");
       const page = Math.max(0, parseInt(url.searchParams.get("page") ?? "0", 10) || 0);
       const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get("limit") ?? "20", 10) || 20));
       const result = listAdminInvestments({
@@ -501,6 +510,7 @@ const routeRequest = async (request, response) => {
               .map((status) => status.trim())
               .filter(Boolean)
           : undefined,
+        search,
         limit,
         offset: page * limit,
       });
