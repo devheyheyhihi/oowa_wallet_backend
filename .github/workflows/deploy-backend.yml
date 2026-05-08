@@ -1,0 +1,110 @@
+name: deploy-backend
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - "README.md"
+      - ".gitignore"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref_name }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate Required Secrets
+        run: |
+          missing=0
+          require() { if [ -z "$1" ]; then echo "Missing $2"; missing=1; fi; }
+          require "${{ secrets.EC2_HOST }}"             "EC2_HOST"
+          require "${{ secrets.EC2_USER }}"             "EC2_USER"
+          require "${{ secrets.EC2_SSH_KEY }}"          "EC2_SSH_KEY"
+          require "${{ secrets.EC2_BACKEND_PATH }}"     "EC2_BACKEND_PATH"
+          require "${{ secrets.OOWA_ADMIN_PASSWORD }}"  "OOWA_ADMIN_PASSWORD"
+          require "${{ secrets.OOWA_APP_SECRET }}"      "OOWA_APP_SECRET"
+          require "${{ secrets.OOWA_ALLOWED_ORIGINS }}" "OOWA_ALLOWED_ORIGINS"
+          if [ "$missing" -ne 0 ]; then
+            echo "❌ Missing required secrets"
+            exit 1
+          fi
+
+      - name: Package Backend
+        run: |
+          rm -rf /tmp/oowa-backend-dist
+          mkdir -p /tmp/oowa-backend-dist
+          cp -R src /tmp/oowa-backend-dist/
+          cp package.json /tmp/oowa-backend-dist/
+          tar -czf backend-standalone.tar.gz -C /tmp/oowa-backend-dist .
+
+      - name: Upload to EC2
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          port: ${{ secrets.EC2_SSH_PORT }}
+          source: "backend-standalone.tar.gz"
+          target: "/tmp"
+
+      - name: Deploy and Restart
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          OOWA_ALLOWED_ORIGINS:             ${{ secrets.OOWA_ALLOWED_ORIGINS }}
+          OOWA_ADMIN_PASSWORD:              ${{ secrets.OOWA_ADMIN_PASSWORD }}
+          OOWA_APP_SECRET:                  ${{ secrets.OOWA_APP_SECRET }}
+          OOWA_INVESTMENT_POOL_MNEMONIC:    ${{ secrets.OOWA_INVESTMENT_POOL_MNEMONIC }}
+          OOWA_INVESTMENT_POOL_PRIVATE_KEY: ${{ secrets.OOWA_INVESTMENT_POOL_PRIVATE_KEY }}
+          OOWA_INVESTMENT_POOL_ADDRESS:     ${{ secrets.OOWA_INVESTMENT_POOL_ADDRESS }}
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          port: ${{ secrets.EC2_SSH_PORT }}
+          envs: OOWA_ALLOWED_ORIGINS,OOWA_ADMIN_PASSWORD,OOWA_APP_SECRET,OOWA_INVESTMENT_POOL_MNEMONIC,OOWA_INVESTMENT_POOL_PRIVATE_KEY,OOWA_INVESTMENT_POOL_ADDRESS
+          script: |
+            set -e
+            APP_DIR="${{ secrets.EC2_BACKEND_PATH }}"
+            APP_DIR="$(echo "$APP_DIR" | tr -d '\r' | xargs)"
+            if [ -z "$APP_DIR" ] || [ "$APP_DIR" = "/" ] || [ "$APP_DIR" = "/home" ] || [ "$APP_DIR" = "/root" ]; then
+              echo "Invalid EC2_BACKEND_PATH: '$APP_DIR'"
+              exit 1
+            fi
+            echo "Deploying to: $APP_DIR"
+            mkdir -p "$APP_DIR"
+
+            # .env 생성
+            {
+              echo "PORT=4000"
+              echo "OOWA_ALLOWED_ORIGINS=$OOWA_ALLOWED_ORIGINS"
+              echo "OOWA_ADMIN_PASSWORD=$OOWA_ADMIN_PASSWORD"
+              echo "OOWA_APP_SECRET=$OOWA_APP_SECRET"
+              [ -n "$OOWA_INVESTMENT_POOL_MNEMONIC" ]    && echo "OOWA_INVESTMENT_POOL_MNEMONIC=$OOWA_INVESTMENT_POOL_MNEMONIC"
+              [ -n "$OOWA_INVESTMENT_POOL_PRIVATE_KEY" ] && echo "OOWA_INVESTMENT_POOL_PRIVATE_KEY=$OOWA_INVESTMENT_POOL_PRIVATE_KEY"
+              [ -n "$OOWA_INVESTMENT_POOL_ADDRESS" ]     && echo "OOWA_INVESTMENT_POOL_ADDRESS=$OOWA_INVESTMENT_POOL_ADDRESS"
+            } > "$APP_DIR/.env"
+            chmod 600 "$APP_DIR/.env"
+
+            # .env와 SQLite DB 파일 보존, 나머지 교체
+            find "$APP_DIR" -mindepth 1 -maxdepth 1 \
+              ! -name '.env' \
+              ! -name '*.db' \
+              ! -name '*.sqlite' \
+              ! -name '.data' \
+              -exec rm -rf {} +
+
+            tar -xzf /tmp/backend-standalone.tar.gz -C "$APP_DIR"
+
+            pm2 start "$APP_DIR/src/index.js" \
+              --name oowa-backend \
+              --interpreter node \
+              --node-args "--env-file=$APP_DIR/.env" \
+              --update-env \
+            || pm2 restart oowa-backend --update-env
+
+            pm2 save

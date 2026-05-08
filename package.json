@@ -1,0 +1,14 @@
+{
+  "name": "oowa-wallet-backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --env-file=.env --watch src/index.js",
+    "start": "node --env-file=.env src/index.js",
+    "check": "node --check src/index.js && node --check src/historyDb.js && node --check src/authCrypto.js && node --check src/walletCrypto.js"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}
